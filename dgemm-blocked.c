@@ -5,39 +5,41 @@
  *    Enable user to select one problem size only via the -n option
  *    Support CBLAS interface
  */
+#include <malloc.h>
+#include <stdio.h>
 #include "emmintrin.h"
-const char* dgemm_desc = "Simple blocked dgemm.";
+const char* dgemm_desc = "cc-mh blocked dgemm.";
 
 // Declare size of L1 cache,3*L1^2 < Mfast
 // Notice! Since we use unrolling here, (i.e 5 2x2 blocks), the L1 BLOCK size should be multiple of 10
 #if !defined(BLOCK_SIZE_L1)
-#define BLOCK_SIZE_L1 10
+#define BLOCK_SIZE_L1 30
 // #define BLOCK_SIZE 719
 #endif
 
 //Declare size of L2 cache, should not fit in L1 but fit in L2
 #if !defined(BLOCK_SIZE_L2)
-#define BLOCK_SIZE_L2 100
+#define BLOCK_SIZE_L2 719
 #endif
 
 #define min(a,b) (((a)<(b))?(a):(b))
-
 /* This is the entrance to do bloking called from square_dgemm.
  * As to do a 2-level cache blocking, this is the L2-blokcing,
  * L1 blocking process is called inside loop
  * This auxiliary subroutine performs a smaller dgemm operation
  *  C := C + A * B
  * where C is M-by-N, A is M-by-K, and B is K-by-N. */
+
 void do_block(int lda, int M, int N, int K, double* A, double* B, double* C){
-  for (int i = 0; i < lda; i += BLOCK_SIZE_L1)
+  for (int i = 0; i < M; i += BLOCK_SIZE_L1)
   {
     int Ms = min(BLOCK_SIZE_L1, M-i);
-    for (int j = 0; j < lda; j += BLOCK_SIZE_L1){
+    for (int j = 0; j < N; j += BLOCK_SIZE_L1){
       /* Accumulate block dgemms into block of C */
-      int Ns = min (BLOCK_SIZE_L2, N-j);
-      for (int k = 0; k < lda; k += BLOCK_SIZE_L1)
+      int Ns = min (BLOCK_SIZE_L1, N-j);
+      for (int k = 0; k < K; k += BLOCK_SIZE_L1*2)
       {
-         int Ks = min (BLOCK_SIZE_L2, K-k);
+         int Ks = min (BLOCK_SIZE_L1*2, K-k);
          // L1 blocking is called inside l2 loop
          do_block_l1_SIMD(lda, Ms, Ns, Ks, A + i*lda + k, B + k*lda + j, C + i*lda + j);
       }
@@ -102,16 +104,17 @@ void do_block_l1_SIMD(int lda, int M, int N, int K, double* A, double* B, double
       for(int k=0; k<K; k+=2){
         //keep a1 a2 a3 a4 inside registers until finish using them
         //Notice we fill 128bits register with 64 double, twice, for A block
-        register __m128d a1 = _mm_load1_pd(A+i*lda+k);
-        register __m128d a2 = _mm_load1_pd(A+i*lda+lda);
-        register __m128d a3 = _mm_load1_pd(A+i*lda+k+1);
-        register __m128d a4 = _mm_load1_pd(A+i*lda+k+lda+1);
+        register __m128d a1 = _mm_load1_pd(A+i*lda + k);
+        register __m128d a2 = _mm_load1_pd(A+i*lda + k + lda);
+        register __m128d a3 = _mm_load1_pd(A+i*lda + k + 1);
+        register __m128d a4 = _mm_load1_pd(A+i*lda + k + lda + 1);
+
 
         //load matrix B streamly 5 times for 5 block
 
         //s1: fill c1 c2
         register __m128d b1 = _mm_load_pd(B + k*lda+ j);
-        register __m128d b2 = _mm_load_pd(B + k*lda + j + lda)
+        register __m128d b2 = _mm_load_pd(B + k*lda + j + lda);
 
         //Vectorize the inner loop
         c1 = _mm_add_pd(c1, _mm_mul_pd(a1, b1));
@@ -121,8 +124,8 @@ void do_block_l1_SIMD(int lda, int M, int N, int K, double* A, double* B, double
   			c2 = _mm_add_pd(c2, _mm_mul_pd(a4, b2));
 
         //s2: fill c3 c4
-        __m128d b1 = _mm_load_pd(B + k*lda + j + 2);
-        __m128d b2 = _mm_load_pd(B + k*lda + j + lda + 2)
+        b1 = _mm_load_pd(B + k*lda + j + 2);
+        b2 = _mm_load_pd(B + k*lda + j + lda + 2);
 
         //Vectorize the inner loop
         c3 = _mm_add_pd(c3, _mm_mul_pd(a1, b1));
@@ -132,8 +135,8 @@ void do_block_l1_SIMD(int lda, int M, int N, int K, double* A, double* B, double
   			c4 = _mm_add_pd(c4, _mm_mul_pd(a4, b2));
 
         //s1: fill c5 c6
-        __m128d b1 = _mm_load_pd(B + k*lda + j + 4);
-        __m128d b2 = _mm_load_pd(B + k*lda + j + lda + 4)
+        b1 = _mm_load_pd(B + k*lda + j + 4);
+        b2 = _mm_load_pd(B + k*lda + j + lda + 4);
 
         //Vectorize the inner loop
         c5 = _mm_add_pd(c5, _mm_mul_pd(a1, b1));
@@ -143,8 +146,8 @@ void do_block_l1_SIMD(int lda, int M, int N, int K, double* A, double* B, double
         c6 = _mm_add_pd(c6, _mm_mul_pd(a4, b2));
 
         //s1: fill c1 c2
-        __m128d b1 = _mm_load_pd(B + k*lda + j + 6);
-        __m128d b2 = _mm_load_pd(B + k*lda + j + lda + 6)
+        b1 = _mm_load_pd(B + k*lda + j + 6);
+        b2 = _mm_load_pd(B + k*lda + j + lda + 6);
 
         //Vectorize the inner loop
         c7 = _mm_add_pd(c7, _mm_mul_pd(a1, b1));
@@ -154,8 +157,8 @@ void do_block_l1_SIMD(int lda, int M, int N, int K, double* A, double* B, double
         c8 = _mm_add_pd(c8, _mm_mul_pd(a4, b2));
 
         //s1: fill c1 c2
-        __m128d b1 = _mm_load_pd(B + k*lda + j + 8);
-        __m128d b2 = _mm_load_pd(B + k*lda + j + lda + 8)
+        b1 = _mm_load_pd(B + k*lda + j + 8);
+        b2 = _mm_load_pd(B + k*lda + j + lda + 8);
 
         //Vectorize the inner loop
         c9 = _mm_add_pd(c9, _mm_mul_pd(a1, b1));
@@ -178,25 +181,11 @@ void do_block_l1_SIMD(int lda, int M, int N, int K, double* A, double* B, double
     }
   }
 }
-double * Matrix_Alignment(double* M, int oldSize, int newSize, bool changeNeedFlag){
+double * Matrix_Alignment(double* M, int oldSize, int newSize){
   __m128d zeros = _mm_setzero_pd();
-  if(!changeNeedFlag){
-    posix_memalign((void**)&M, 16, sizeof(double)*new_size*new_size);
-
-    for(int i=0; i<newSize*newSize; i+=BLOCK_SIZE_L1) {
-      _mm_store_pd(M+i,   zeros);
-      _mm_store_pd(M+i+2, zeros);
-      _mm_store_pd(M+i+4, zeros);
-      _mm_store_pd(M+i+6, zeros);
-      _mm_store_pd(M+i+8, zeros);
-    }
-    return M;
-  }
-
-
   //Matrix should be aligned to 16-byte for SSE
-  double *pM = (double*) _aligned_malloc(newSize*newSize * sizeof(double), 16); // align to 16-byte for SSE
-
+  double *pM;/// = (double*) _aligned_malloc(newSize*newSize * sizeof(double), 16); // align to 16-byte for SSE
+  posix_memalign((void**)&pM, 16, newSize*newSize * sizeof(double));
   int bonder = oldSize - oldSize%2;
     for(int i=0; i<oldSize; i++){
       for(int j=0; j<bonder; j+=2){
@@ -206,7 +195,7 @@ double * Matrix_Alignment(double* M, int oldSize, int newSize, bool changeNeedFl
       if(bonder!=oldSize)
         pM[i*newSize + oldSize-1] = M[i*oldSize + oldSize-1];
       for(int j=oldSize; j<newSize; j++) {
-        pM[i*new_size + j] = 0;
+        pM[i*newSize + j] = 0;
       }
   }
 	for(int i=oldSize; i<newSize; i++) {
@@ -219,6 +208,7 @@ double * Matrix_Alignment(double* M, int oldSize, int newSize, bool changeNeedFl
 			_mm_store_pd(addr+j+8, zeros);
 		}
     return pM;
+  }
 }
 /* This routine performs a dgemm operation
  *  C := C + A * B
@@ -229,12 +219,21 @@ void square_dgemm (int lda, double* A, double* B, double* C)
   //TODO: Optimize a parameter, maybe tilling size here?
   /* Do matrix padding first. */
   int lda_unpadded = lda;
-  lda = lda + BLOCK_SIZE_L1 - lda % BLOCK_SIZE_L1;
+  lda = lda + 10 - lda % 10;
   double* C_unpadded = C;
 
-  A = Matrix_Alignment(A, lda_unpadded, lda, true);
-  B = Matrix_Alignment(B, lda_unpadded, lda, true);
-  C_padded = Matrix_Alignment(C, lda_unpadded, lda, false);
+  __m128d zeros = _mm_setzero_pd();
+  posix_memalign((void**)&C, 16, sizeof(double)*lda*lda);
+  for(int i=0; i<lda*lda; i+=10) {
+    _mm_store_pd(C+i,   zeros);
+    _mm_store_pd(C+i+2, zeros);
+    _mm_store_pd(C+i+4, zeros);
+    _mm_store_pd(C+i+6, zeros);
+    _mm_store_pd(C+i+8, zeros);
+  }
+
+  A = Matrix_Alignment(A, lda_unpadded, lda);
+  B = Matrix_Alignment(B, lda_unpadded, lda);
 
   /* For each block-row of A */
   for (int i = 0; i < lda; i += BLOCK_SIZE_L2){
@@ -249,7 +248,7 @@ void square_dgemm (int lda, double* A, double* B, double* C)
 	       int K = min (BLOCK_SIZE_L2, lda-k);
 	       /* Perform individual block dgemm */
          //Notice this fetch a large portion of data into L2 cache first, and then fetch data from the L2 cache into the L1 cache to perform multiplication
-	       do_block(lda, M, N, K, A + i*lda + k, B + k*lda + j, C_padded + i*lda + j);
+	       do_block(lda, M, N, K, A + i*lda + k, B + k*lda + j, C + i*lda + j);
       }
     }
   }
@@ -261,6 +260,32 @@ void square_dgemm (int lda, double* A, double* B, double* C)
         B[j*lda+i] = t;
   }
 #endif
-  //TODO: Copy back Matrix C
-  //Matrix_Unpadded_Copy(C_padded, C, lda_unpadded, lda);
+// Copy back Matrix C:C->C_unpadded
+  if(lda_unpadded%2 == 1){
+    for(int i=0; i<lda_unpadded; i++){
+      double * addrbase_u = C_unpadded+i*lda_unpadded;
+      double * addrbase_p = C+i*lda;
+      for(int j=0; j<lda_unpadded-1; j+=2){
+        register __m128d tmp = _mm_load_pd(addrbase_p + j);
+        _mm_storeu_pd(addrbase_u + j, tmp);
+      }
+      C_unpadded[(i+1)*lda_unpadded-1] = C[i*lda+lda_unpadded-1];
+    }
+
+  }
+  else{
+    for(int i=0; i<lda_unpadded; i++){
+      double * addrbase_u = C_unpadded+i*lda_unpadded;
+      double * addrbase_p = C+i*lda;
+      for(int j=0; j<lda_unpadded; j+=2){
+        register __m128d tmp = _mm_load_pd(addrbase_p+j);
+        _mm_storeu_pd(addrbase_u+j, tmp);
+      }
+    }
+  }
+  //
+free(C);
+C = C_unpadded;
+free(A);
+free(B);
 }
